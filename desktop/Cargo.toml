@@ -7,3 +7,11 @@ edition = "2021"
 
 [dependencies]
 chip8_core = { path = "../chip8_core" }
+
+[dependencies.sdl2]
+version = "^0.34.3"
+default-features = false
+features = ["ttf"]
+
+[dependencies.sdl2-sys]
+features = ["use_mac_framework"]

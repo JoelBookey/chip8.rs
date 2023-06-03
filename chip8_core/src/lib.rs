@@ -1,3 +1,5 @@
+use rand::random;
+
 pub const SCREEN_WIDTH: usize = 64;
 pub const SCREEN_HEIGHT: usize = 32;
 
@@ -55,7 +57,7 @@ impl Emu {
             st: 0,
         };
 
-        new_emu[..FONTSET_SIZE].copy_from_slice(&FONTSET);
+        new_emu.ram[..FONTSET_SIZE].copy_from_slice(&FONTSET);
 
         new_emu
     }
@@ -90,14 +92,14 @@ impl Emu {
         op
     }
 
-    fn execute(op: u16) {
+    fn execute(&mut self, op: u16) {
         // splits the two bytes in to nibbles or hex digits
         // e.g. for the first digit 1101 1010 1100 1110 & 1111 0000 0000 0000 = 1101
         // you then move it to the front of the two bytes
         let nibble1 = (op & 0xF000) >> 12;
         let nibble2 = (op & 0x0F00) >> 8;
         let nibble3 = (op & 0x00F0) >> 4;
-        let nibble4 = (op & 0x000F);
+        let nibble4 = op & 0x000F;
 
         match (nibble1, nibble2, nibble3, nibble4) {
             // NOP
@@ -107,13 +109,13 @@ impl Emu {
                 self.screen = [false; SCREEN_WIDTH * SCREEN_HEIGHT];
             }
             // return from subroutine
-            (0, 0, 0xE, 0) => {
+            (0, 0, 0xE, 0xE) => {
                 let addr = self.pop();
                 self.pc = addr;
             }
-            // jump to address
+            // jump to address NNN
             (1, _, _, _) => {
-                self.pc = 0xFFF & self.op;
+                self.pc = 0xFFF & op;
             }
             // call subroutine
             (2, _, _, _) => {
@@ -148,20 +150,20 @@ impl Emu {
             (6, _, _, _) => {
                 let x = nibble2 as usize;
                 let nn = (op & 0xFF) as u8;
-                self.v_reg[x] = nn; 
+                self.v_reg[x] = nn;
             }
             // VX += NN
             (7, _, _, _) => {
                 let x = nibble2 as usize;
-                let nn - (op & 0xFF) as u8;
-                self.v_reg[x] = self.v_reg[x].wrapping_add(n);
+                let nn = (op & 0xFF) as u8;
+                self.v_reg[x] = self.v_reg[x].wrapping_add(nn);
             }
-            // VX = VY 
+            // VX = VY
             (8, _, _, 0) => {
                 let x = nibble2 as usize;
                 let y = nibble3 as usize;
                 self.v_reg[x] = self.v_reg[y];
-            } 
+            }
             // VX |= VY
             (8, _, _, 1) => {
                 let x = nibble2 as usize;
@@ -186,7 +188,7 @@ impl Emu {
                 let y = nibble3 as usize;
 
                 let (val, carry) = self.v_reg[x].overflowing_add(self.v_reg[y]);
-                let flag = if carry {1} else {0};
+                let flag = if carry { 1 } else { 0 };
 
                 self.v_reg[x] = val;
                 self.v_reg[0xF] = flag;
@@ -197,7 +199,7 @@ impl Emu {
                 let y = nibble3 as usize;
 
                 let (val, borrow) = self.v_reg[x].overflowing_sub(self.v_reg[y]);
-                let flag = if borrow {0} else {1};
+                let flag = if borrow { 0 } else { 1 };
 
                 self.v_reg[x] = val;
                 self.v_reg[0xF] = flag;
@@ -215,11 +217,11 @@ impl Emu {
                 let y = nibble3 as usize;
 
                 let (val, borrow) = self.v_reg[y].overflowing_sub(self.v_reg[x]);
-                let flag if borrow {0} else {1};
+                let flag = if borrow { 0 } else { 1 };
 
                 self.v_reg[x] = val;
-                self.v_reg[0xF] = borrow;
-            },
+                self.v_reg[0xF] = flag;
+            }
             // VX <<= 1
             (8, _, _, 0xE) => {
                 let x = nibble2 as usize;
@@ -245,9 +247,149 @@ impl Emu {
                 let nnn = op & 0xFFF;
                 self.pc = (self.v_reg[0] as u16) + nnn;
             }
+            // VX = rand() & nn
+            (0xC, _, _, _) => {
+                let x = nibble2 as usize;
+                let nn = (op & 0xFF) as u8;
+                let rng: u8 = random();
+                self.v_reg[x] = rng & nn;
+            }
+            // draw DXYN where n = number of rows
+            (0xD, _, _, _) => {
+                let x_coord = self.v_reg[nibble2 as usize] as u16;
+                let y_coord = self.v_reg[nibble3 as usize] as u16;
+                let num_rows = nibble4;
 
+                let mut flipped = false;
+                for line_number in 0..num_rows {
+                    let addr = self.i_reg + line_number as u16;
+                    let pixels = self.ram[addr as usize];
+
+                    for col_number in 0..8 {
+                        // use a mask to check if the current pixel != 0
+                        if (pixels & (0b1000_0000 >> col_number)) != 0 {
+                            let x = (x_coord + col_number) as usize % SCREEN_WIDTH;
+                            let y = (y_coord + line_number) as usize % SCREEN_HEIGHT;
+
+                            let idx = x + SCREEN_WIDTH * y;
+
+                            flipped |= self.screen[idx];
+                            self.screen[idx] ^= true;
+                        }
+                    }
+                }
+
+                if flipped {
+                    self.v_reg[0xF] = 1;
+                } else {
+                    self.v_reg[0xF] = 0;
+                }
+            }
+            // skip if key pressed
+            (0xE, _, 9, 0xE) => {
+                let vx = self.v_reg[nibble2 as usize];
+                let key = self.keys[vx as usize];
+                if key {
+                    self.pc += 2;
+                }
+            }
+            // skip if key not pressed
+            (0xE, _, 0xA, 1) => {
+                let vx = self.v_reg[nibble2 as usize];
+                let key = self.keys[vx as usize];
+                if !key {
+                    self.pc += 2;
+                }
+            }
+            // VX = DT
+            (0xF, _, 0, 7) => {
+                let x = nibble2 as usize;
+                self.v_reg[x] = self.dt;
+            }
+            // wait for key press
+            (0xF, _, 0, 0xA) => {
+                let x = nibble2 as usize;
+                let mut pressed = false;
+                for i in 0..self.keys.len() {
+                    if self.keys[i] {
+                        self.v_reg[x] = i as u8;
+                        pressed = true;
+                        break;
+                    }
+                }
+
+                if !pressed {
+                    self.pc -= 2;
+                }
+            }
+            // DT = VX
+            (0xF, _, 1, 5) => {
+                let x = nibble2 as usize;
+                self.dt = self.v_reg[x];
+            }
+            // ST = VX
+            (0xF, _, 1, 8) => {
+                let x = nibble2 as usize;
+                self.st = self.v_reg[x];
+            }
+            // I += VX
+            (0xF, _, 1, 0xE) => {
+                let vx = self.v_reg[nibble2 as usize] as u16;
+                self.i_reg = self.i_reg.wrapping_add(vx);
+            }
+            // set i to font address
+            (0xF, _, 2, 9) => {
+                let c = self.v_reg[nibble2 as usize] as u16;
+                self.i_reg = c * 5;
+            }
+            // BCD
+            (0xF, _, 3, 3) => {
+                let x = nibble2 as usize;
+                let vx = self.v_reg[x] as f32;
+
+                // Fetch the hundreds digit by dividing by 100 and tossing the decimal
+                let hundreds = (vx / 100.0).floor() as u8;
+                // Fetch the tens digit by dividing by 10, tossing the ones digit and the decimal
+                let tens = ((vx / 10.0) % 10.0).floor() as u8;
+                // Fetch the ones digit by tossing the hundreds and the tens
+                let ones = (vx % 10.0) as u8;
+
+                self.ram[self.i_reg as usize] = hundreds;
+                self.ram[(self.i_reg + 1) as usize] = tens;
+                self.ram[(self.i_reg + 2) as usize] = ones;
+            }
+            // store V0..VX into i
+            (0xF, _, 5, 5) => {
+                let x = nibble2 as usize;
+                let i = self.i_reg as usize;
+                for idx in 0..=x {
+                    self.ram[i + idx] = self.v_reg[idx];
+                }
+            }
+            // load i into V0..VX
+            (0xF, _, 6, 5) => {
+                let x = nibble2 as usize;
+                let i = self.i_reg as usize;
+                for idx in 0..=x {
+                    self.v_reg[idx] = self.ram[i + idx];
+                }
+            }
             (_, _, _, _) => unimplemented!("Unimplemented op code: {}", op),
         }
+    }
+
+    pub fn get_display(&self) -> &[bool] {
+        &self.screen
+    }
+
+    pub fn keypress(&mut self, idx: usize, pressed: bool) {
+        self.keys[idx] = pressed;
+    }
+
+    pub fn load(&mut self, data: &[u8]) {
+        let start = START_ADDR as usize;
+        let end = (START_ADDR as usize) + data.len();
+        self.ram[start..end].copy_from_slice(data);
     }
 
     pub fn tick_timers(&mut self) {
